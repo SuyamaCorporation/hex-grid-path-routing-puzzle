@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hex Game – Path Routing Strategy</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #f1f5f9; }
+  svg { cursor: pointer; }
+  .hex-cell { transition: fill 0.15s; }
+  .hex-cell:hover { filter: brightness(1.15); }
+  .hex-win { animation: pulse 0.6s ease-in-out infinite alternate; }
+  @keyframes pulse { from { filter: brightness(1.0); } to { filter: brightness(1.4); } }
+</style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center bg-slate-100 p-4">
+
+<div class="w-full max-w-3xl">
+  <div class="text-center mb-4">
+    <h1 class="text-3xl font-bold text-slate-800 mb-1">Hex Game</h1>
+    <p class="text-slate-500 text-sm">Connect top↔bottom (Red) or left↔right (Blue)</p>
+  </div>
+
+  <!-- Controls -->
+  <div class="flex flex-wrap gap-3 justify-center mb-4">
+    <div class="flex gap-2 items-center">
+      <label for="sizeSelect" class="text-slate-600 text-sm font-medium">Board:</label>
+      <select id="sizeSelect" class="bg-white border border-slate-300 text-slate-700 text-sm rounded px-2 py-1">
+        <option value="7">7×7</option>
+        <option value="9" selected>9×9</option>
+        <option value="11">11×11</option>
+      </select>
+    </div>
+    <div class="flex gap-2 items-center">
+      <label for="opponentSelect" class="text-slate-600 text-sm font-medium">vs:</label>
+      <select id="opponentSelect" class="bg-white border border-slate-300 text-slate-700 text-sm rounded px-2 py-1">
+        <option value="ai">AI</option>
+        <option value="human">Human 2P</option>
+      </select>
+    </div>
+    <button id="newGameBtn" class="bg-slate-700 hover:bg-slate-600 text-white font-bold px-4 py-1.5 rounded-lg transition text-sm">New Game</button>
+    <button id="undoBtn" class="bg-slate-400 hover:bg-slate-300 text-slate-800 font-bold px-4 py-1.5 rounded-lg transition text-sm">Undo</button>
+  </div>
+
+  <!-- Turn Indicator -->
+  <div class="flex justify-center gap-6 mb-3">
+    <div id="p1Indicator" class="flex items-center gap-2 px-4 py-2 rounded-lg border-2 border-red-400 bg-red-50">
+      <div class="w-4 h-4 rounded-full bg-red-500"></div>
+      <span class="text-red-700 font-semibold text-sm">Red: Top↔Bottom</span>
+    </div>
+    <div id="p2Indicator" class="flex items-center gap-2 px-4 py-2 rounded-lg border-2 border-blue-300 bg-slate-100">
+      <div class="w-4 h-4 rounded-full bg-blue-500"></div>
+      <span class="text-blue-700 font-semibold text-sm">Blue: Left↔Right</span>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div id="statusMsg" class="text-center font-bold text-lg text-slate-700 mb-3 h-8">Red's turn</div>
+
+  <!-- Win/Loss Record -->
+  <div class="flex justify-center gap-6 mb-3 text-sm text-slate-500">
+    <span>Wins: <span id="winsDisplay" class="font-bold text-green-600">0</span></span>
+    <span>Losses: <span id="lossDisplay" class="font-bold text-red-600">0</span></span>
+  </div>
+
+  <!-- Board -->
+  <div class="flex justify-center overflow-auto">
+    <svg id="hexBoard" aria-label="Hex game board"></svg>
+  </div>
+</div>
+
+<script>
+// ── Hex geometry ───────────────────────────────────────────────────────────
+const HEX_SIZE = 22;
+const HEX_W = Math.sqrt(3) * HEX_SIZE;
+const HEX_H = 2 * HEX_SIZE;
+
+function hexCorners(cx, cy) {
+  return Array.from({length:6}, (_,i) => {
+    const a = Math.PI / 180 * (60 * i - 30);
+    return [cx + HEX_SIZE * Math.cos(a), cy + HEX_SIZE * Math.sin(a)];
+  }).map(p => p.join(',')).join(' ');
+}
+
+function hexCenter(row, col, N) {
+  const offsetX = 40 + (N * HEX_W * 0.55);
+  const x = offsetX + col * HEX_W + row * HEX_W * 0.5;
+  const y = 40 + row * HEX_H * 0.75;
+  return [x, y];
+}
+
+// ── State ──────────────────────────────────────────────────────────────────
+let N, board, currentPlayer, moveHistory, gameOver, vsAI;
+
+function initGame() {
+  N = parseInt(document.getElementById('sizeSelect').value);
+  vsAI = document.getElementById('opponentSelect').value === 'ai';
+  board = Array.from({length:N}, () => Array(N).fill(0)); // 0=empty 1=red 2=blue
+  currentPlayer = 1;
+  moveHistory = [];
+  gameOver = false;
+  document.getElementById('statusMsg').textContent = "Red's turn";
+  updateIndicators();
+  renderBoard();
+}
+
+function renderBoard() {
+  const svg = document.getElementById('hexBoard');
+  const svgW = 40 + N * HEX_W + N * HEX_W * 0.5 + 60;
+  const svgH = 40 + N * HEX_H * 0.75 + HEX_SIZE * 2;
+  svg.setAttribute('width', Math.ceil(svgW));
+  svg.setAttribute('height', Math.ceil(svgH));
+  svg.innerHTML = '';
+
+  // Border labels
+  const textStyle = 'font-size:11px;fill:#475569;font-family:sans-serif;font-weight:600';
+  // top/bottom labels for Red
+  for (let c = 0; c < N; c++) {
+    const [x0,y0] = hexCenter(0, c, N);
+    const [x1,y1] = hexCenter(N-1, c, N);
+    const t0 = document.createElementNS('http://www.w3.org/2000/svg','text');
+    t0.setAttribute('x', x0); t0.setAttribute('y', y0 - HEX_SIZE - 4);
+    t0.setAttribute('text-anchor','middle'); t0.setAttribute('style', 'font-size:9px;fill:#ef4444;font-weight:bold');
+    t0.textContent = '▼'; svg.appendChild(t0);
+  }
+
+  // Draw cells
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      const [cx, cy] = hexCenter(r, c, N);
+      const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+      poly.setAttribute('points', hexCorners(cx, cy));
+      const v = board[r][c];
+      const color = v === 1 ? '#ef4444' : v === 2 ? '#3b82f6' : '#e2e8f0';
+      poly.setAttribute('fill', color);
+      poly.setAttribute('stroke', '#94a3b8');
+      poly.setAttribute('stroke-width', '1.5');
+      poly.setAttribute('class', 'hex-cell');
+      poly.setAttribute('data-row', r);
+      poly.setAttribute('data-col', c);
+      poly.setAttribute('role', 'button');
+      poly.setAttribute('aria-label', `Cell row ${r+1} col ${c+1}${v===1?' red':v===2?' blue':''}`);
+      if (v === 0 && !gameOver) poly.addEventListener('click', onCellClick);
+      svg.appendChild(poly);
+    }
+  }
+}
+
+function onCellClick(e) {
+  if (gameOver) return;
+  const r = parseInt(e.target.getAttribute('data-row'));
+  const c = parseInt(e.target.getAttribute('data-col'));
+  if (board[r][c] !== 0) return;
+  makeMove(r, c, currentPlayer);
+}
+
+function makeMove(r, c, player) {
+  board[r][c] = player;
+  moveHistory.push([r, c, player]);
+  if (checkWin(player)) {
+    gameOver = true;
+    const winPath = getWinPath(player);
+    highlightWinPath(winPath, player);
+    const winner = player === 1 ? 'Red' : 'Blue';
+    document.getElementById('statusMsg').textContent = `${winner} wins!`;
+    updateRecord(player);
+    return;
+  }
+  currentPlayer = currentPlayer === 1 ? 2 : 1;
+  document.getElementById('statusMsg').textContent = currentPlayer === 1 ? "Red's turn" : "Blue's turn";
+  updateIndicators();
+  renderBoard();
+  if (vsAI && currentPlayer === 2 && !gameOver) { setTimeout(aiMove, 300); }
+}
+
+function aiMove() {
+  if (gameOver) return;
+  // Strategy: try to block player 1 path, else random
+  const empties = [];
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (board[r][c] === 0) empties.push([r,c]);
+  if (empties.length === 0) return;
+
+  // Check if AI can win
+  for (const [r,c] of shuffled(empties)) {
+    board[r][c] = 2;
+    if (checkWin(2)) { board[r][c] = 0; makeMove(r, c, 2); return; }
+    board[r][c] = 0;
+  }
+  // Block player 1
+  for (const [r,c] of shuffled(empties)) {
+    board[r][c] = 1;
+    if (checkWin(1)) { board[r][c] = 0; makeMove(r, c, 2); return; }
+    board[r][c] = 0;
+  }
+  // Prefer center-ish cells
+  const scored = empties.map(([r,c]) => {
+    const dr = r - N/2, dc = c - N/2;
+    return { r, c, s: -(dr*dr + dc*dc) + Math.random()*2 };
+  });
+  scored.sort((a,b) => b.s - a.s);
+  makeMove(scored[0].r, scored[0].c, 2);
+}
+
+function shuffled(arr) { return [...arr].sort(() => Math.random() - 0.5); }
+
+// BFS win check
+function checkWin(player) {
+  return getWinPath(player).length > 0;
+}
+
+function getWinPath(player) {
+  // Player 1 (red): connect row 0 to row N-1
+  // Player 2 (blue): connect col 0 to col N-1
+  const visited = Array.from({length:N}, () => Array(N).fill(false));
+  const prev = Array.from({length:N}, () => Array(N).fill(null));
+  const queue = [];
+
+  if (player === 1) {
+    for (let c = 0; c < N; c++) if (board[0][c] === 1) { queue.push([0,c]); visited[0][c] = true; }
+  } else {
+    for (let r = 0; r < N; r++) if (board[r][0] === 2) { queue.push([r,0]); visited[r][0] = true; }
+  }
+
+  while (queue.length > 0) {
+    const [r,c] = queue.shift();
+    if (player === 1 && r === N-1) return tracePath(prev, r, c, player);
+    if (player === 2 && c === N-1) return tracePath(prev, r, c, player);
+    for (const [nr,nc] of hexNeighbors(r,c)) {
+      if (!visited[nr][nc] && board[nr][nc] === player) {
+        visited[nr][nc] = true;
+        prev[nr][nc] = [r,c];
+        queue.push([nr,nc]);
+      }
+    }
+  }
+  return [];
+}
+
+function tracePath(prev, r, c, player) {
+  const path = [];
+  let cur = [r,c];
+  while (cur) { path.push(cur); cur = prev[cur[0]][cur[1]]; }
+  return path;
+}
+
+function hexNeighbors(r, c) {
+  const dirs = [[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0]];
+  return dirs.map(([dr,dc]) => [r+dr, c+dc]).filter(([nr,nc]) => nr>=0 && nr<N && nc>=0 && nc<N);
+}
+
+function highlightWinPath(path, player) {
+  renderBoard();
+  const svg = document.getElementById('hexBoard');
+  path.forEach(([r,c]) => {
+    const [cx,cy] = hexCenter(r, c, N);
+    const poly = svg.querySelector(`[data-row="${r}"][data-col="${c}"]`);
+    if (poly) {
+      poly.setAttribute('fill', player === 1 ? '#fca5a5' : '#93c5fd');
+      poly.setAttribute('class', 'hex-cell hex-win');
+      poly.setAttribute('stroke', player === 1 ? '#b91c1c' : '#1d4ed8');
+      poly.setAttribute('stroke-width', '3');
+    }
+  });
+}
+
+function updateIndicators() {
+  const p1 = document.getElementById('p1Indicator');
+  const p2 = document.getElementById('p2Indicator');
+  if (currentPlayer === 1) {
+    p1.className = 'flex items-center gap-2 px-4 py-2 rounded-lg border-2 border-red-500 bg-red-100';
+    p2.className = 'flex items-center gap-2 px-4 py-2 rounded-lg border-2 border-blue-300 bg-slate-100';
+  } else {
+    p1.className = 'flex items-center gap-2 px-4 py-2 rounded-lg border-2 border-red-300 bg-slate-100';
+    p2.className = 'flex items-center gap-2 px-4 py-2 rounded-lg border-2 border-blue-500 bg-blue-100';
+  }
+}
+
+function updateRecord(winner) {
+  const wins = parseInt(localStorage.getItem('hex_wins') || '0');
+  const losses = parseInt(localStorage.getItem('hex_losses') || '0');
+  if (!vsAI) {
+    // 2P: no record change
+  } else if (winner === 1) {
+    localStorage.setItem('hex_wins', wins + 1);
+  } else {
+    localStorage.setItem('hex_losses', losses + 1);
+  }
+  document.getElementById('winsDisplay').textContent = parseInt(localStorage.getItem('hex_wins')||'0');
+  document.getElementById('lossDisplay').textContent = parseInt(localStorage.getItem('hex_losses')||'0');
+}
+
+document.getElementById('newGameBtn').addEventListener('click', initGame);
+document.getElementById('undoBtn').addEventListener('click', () => {
+  if (gameOver || moveHistory.length === 0) return;
+  const steps = (vsAI && currentPlayer === 1 && moveHistory.length >= 2) ? 2 : 1;
+  for (let i = 0; i < steps && moveHistory.length > 0; i++) {
+    const [r,c,p] = moveHistory.pop();
+    board[r][c] = 0;
+    currentPlayer = p;
+  }
+  gameOver = false;
+  document.getElementById('statusMsg').textContent = currentPlayer === 1 ? "Red's turn" : "Blue's turn";
+  updateIndicators();
+  renderBoard();
+});
+
+// Load record
+document.getElementById('winsDisplay').textContent = localStorage.getItem('hex_wins') || '0';
+document.getElementById('lossDisplay').textContent = localStorage.getItem('hex_losses') || '0';
+initGame();
+</script>
+</body>
+</html>
